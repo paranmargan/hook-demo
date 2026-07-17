@@ -1,52 +1,130 @@
-- name: Set up QEMU
-  uses: docker/setup-qemu-action@v3
+name: Build, Scan and Deploy
 
-- name: Set up Docker Buildx
-  uses: docker/setup-buildx-action@v3
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - "values.yaml"
+      - "security-reports/**"
 
-- name: Login to Docker Hub
-  uses: docker/login-action@v3
-  with:
-    username: ${{ secrets.DOCKERHUB_USERNAME }}
-    password: ${{ secrets.DOCKERHUB_TOKEN }}
+permissions:
+  contents: write
 
-- name: Build and push Docker image
-  uses: docker/build-push-action@v6
-  with:
-    context: .
-    push: true
-    platforms: linux/amd64,linux/arm64
-    tags: |
-      ${{ secrets.DOCKERHUB_USERNAME }}/hook-demo:${{ github.sha }}
-      ${{ secrets.DOCKERHUB_USERNAME }}/hook-demo:latest
+jobs:
+  build-scan-deploy:
+    runs-on: ubuntu-latest
 
-- name: Scan Docker image with Trivy
-  uses: aquasecurity/trivy-action@0.33.1
-  with:
-    image-ref: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/hook-demo:${{ github.sha }}
-    format: table
-    vuln-type: os,library
-    severity: HIGH,CRITICAL
-    ignore-unfixed: true
-    exit-code: 1
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-- name: Update development image tag
-  run: |
-    sed -i \
-      "s/tag:.*/tag: \"${GITHUB_SHA}\"/" \
-      environments/dev/values.yaml
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
 
-- name: Commit Helm values change
-  run: |
-    git config user.name "github-actions[bot]"
-    git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-    git add environments/dev/values.yaml
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-    if git diff --cached --quiet; then
-      echo "No Helm values changes"
-      exit 0
-    fi
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: |
+            docker.io/${{ secrets.DOCKERHUB_USERNAME }}/hook-demo:${{ github.sha }}
+            docker.io/${{ secrets.DOCKERHUB_USERNAME }}/hook-demo:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
-    git commit -m "Update dev image to ${GITHUB_SHA} [skip ci]"
-    git push
+      - name: Scan Docker image with Trivy
+        uses: aquasecurity/trivy-action@0.33.1
+        with:
+          image-ref: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/hook-demo:${{ github.sha }}
+          format: table
+          vuln-type: os,library
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: 1
+
+      - name: Update image tag in root values.yaml
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          path = Path("values.yaml")
+          image_tag = os.environ["IMAGE_TAG"]
+
+          if not path.exists():
+              raise SystemExit(f"File not found: {path}")
+
+          lines = path.read_text().splitlines()
+          output = []
+          inside_image = False
+          image_indent = None
+          updated = False
+
+          for line in lines:
+              stripped = line.strip()
+              indent = len(line) - len(line.lstrip())
+
+              if stripped == "image:":
+                  inside_image = True
+                  image_indent = indent
+                  output.append(line)
+                  continue
+
+              if (
+                  inside_image
+                  and stripped
+                  and indent <= image_indent
+                  and not stripped.startswith("#")
+              ):
+                  inside_image = False
+
+              if inside_image and stripped.startswith("tag:"):
+                  prefix = line[:indent]
+                  output.append(f'{prefix}tag: "{image_tag}"')
+                  updated = True
+              else:
+                  output.append(line)
+
+          if not updated:
+              raise SystemExit(
+                  "Could not find image.tag in the root values.yaml"
+              )
+
+          path.write_text("\n".join(output) + "\n")
+          print(f"Updated image.tag in {path} to {image_tag}")
+          PY
+
+      - name: Commit and push values.yaml
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add values.yaml
+
+          if git diff --cached --quiet; then
+            echo "No values.yaml changes to commit"
+            exit 0
+          fi
+
+          git commit -m "Update image tag to ${IMAGE_TAG} [skip ci]"
+
+          git pull --rebase origin main
+          git push origin HEAD:main
