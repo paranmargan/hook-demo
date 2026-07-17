@@ -2,7 +2,7 @@ repicaCount: 1
 
 image:
   repository: nginx
-  tag: "2.0"
+  tag: "latest"
 
 service:
   type: ClusterIP
