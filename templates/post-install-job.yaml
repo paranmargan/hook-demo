@@ -1,0 +1,23 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: "{{ .Release.Name }}-postinstall"
+  annotations:
+    "helm.sh/hook": post-install
+    "helm.sh/hook-weight": "10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 1
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: smoke-test
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              echo "Running post-install smoke test"
+              sleep 5
+              echo "Smoke test completed"
